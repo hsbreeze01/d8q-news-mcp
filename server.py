@@ -284,7 +284,7 @@ def d8q_get_stock_profile(stock_code: str) -> str:
 def d8q_search_reports(stocks: str, days: int = 7, limit_per_stock: int = 10) -> str:
     """批量查询股票研报。根据股票名称或代码搜索相关研报，适合生成周报。
 
-    数据源：洞见研报（券商研报、机构调研、定期报告）。
+    数据源：洞见研报（券商研报）+ 慧博投研（机构调研）+ 巨潮资讯（公告），三源聚合。
 
     参数：
     - stocks: 股票列表，逗号分隔，支持名称或代码。如 "宁德时代,比亚迪,600036"
@@ -299,55 +299,72 @@ def d8q_search_reports(stocks: str, days: int = 7, limit_per_stock: int = 10) ->
     if not stock_list:
         return "错误：请提供至少一个股票名称或代码"
 
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     all_sections = []
     total_reports = 0
 
     for stock in stock_list:
-        data = _get(f"{SHARK_BASE}/api/report/search", params={"keyword": stock, "limit": 20})
+        data = _get(f"{SHARK_BASE}/api/report/stock/{stock}", params={"days": days, "stock_name": stock})
         if not data:
             all_sections.append(f"### {stock}\n\n⚠ 查询失败，无法获取研报数据\n")
             continue
 
-        raw_reports = data.get("reports", [])
-        reports = [r for r in raw_reports if r.get("date", "") >= cutoff]
+        reports = data.get("reports", [])
+        announcements = data.get("announcements", [])
+        sources = data.get("sources_summary", {})
+        src_desc = f"洞见研报 {sources.get('djyanbao', 0)} 篇，慧博投研 {sources.get('hibor', 0)} 篇，巨潮公告 {sources.get('cninfo', 0)} 条"
 
-        if not reports:
+        combined = reports[:limit_per_stock]
+
+        if not combined and not announcements:
             all_sections.append(f"### {stock}\n\n近 {days} 天暂无研报\n")
             continue
 
-        reports = reports[:limit_per_stock]
-        total_reports += len(reports)
+        total_reports += len(combined)
 
-        # group by category
-        categories = {}
-        for r in reports:
-            cat = r.get("category", "其他")
-            categories.setdefault(cat, []).append(r)
+        section_lines = [f"### {stock}（{len(combined)} 篇研报）\n"]
+        section_lines.append(f"数据源：{src_desc}\n")
 
-        section_lines = [f"### {stock}（{len(reports)} 篇研报）\n"]
-        for cat, cat_reports in categories.items():
-            section_lines.append(f"\n#### {cat}\n")
-            for r in cat_reports:
-                title = r.get("title", "无标题")
-                org = r.get("org", "")
-                date = r.get("date", "")
-                summary = (r.get("summary") or "")[:120]
-                url = r.get("detail_url", "")
-                link = f"  [详情]({url})" if url else ""
-                section_lines.append(f"- **{title}**")
-                if org:
-                    section_lines.append(f"  机构: {org} | 日期: {date}{link}")
-                if summary:
-                    section_lines.append(f"  摘要: {summary}")
+        seen_titles = set()
+        unique = []
+        for r in combined:
+            t = r.get("title", "")
+            if t not in seen_titles:
+                seen_titles.add(t)
+                unique.append(r)
+
+        for r in unique:
+            title = r.get("title", "无标题")
+            org = r.get("org", "")
+            date = r.get("date", "")
+            source = r.get("source", "")
+            summary = (r.get("summary") or "")[:120]
+            url = r.get("detail_url", "")
+            src_tag = f"[{source}] " if source else ""
+            link = f"  [详情]({url})" if url else ""
+            section_lines.append(f"- **{src_tag}{title}**")
+            meta_parts = []
+            if org:
+                meta_parts.append(f"机构: {org}")
+            meta_parts.append(f"日期: {date}")
+            meta_parts.append(link)
+            section_lines.append("  " + " | ".join(filter(None, meta_parts)))
+            if summary:
+                section_lines.append(f"  摘要: {summary}")
+
+        if announcements:
+            section_lines.append(f"\n#### 巨潮公告（{len(announcements)} 条）\n")
+            for a in announcements[:5]:
+                section_lines.append(f"- {a.get('date', '')} {a.get('title', '')}  [详情]({a.get('detail_url', '')})")
 
         all_sections.append("\n".join(section_lines))
 
     header = f"# 研报周报（近 {days} 天）\n\n"
     header += f"查询股票: {', '.join(stock_list)} | 共 {total_reports} 篇研报\n"
+    header += f"数据源：洞见研报 + 慧博投研 + 巨潮资讯\n"
     header += f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n---\n\n"
 
     return header + "\n\n".join(all_sections)
+
 
 
 if __name__ == "__main__":
