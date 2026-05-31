@@ -8,9 +8,11 @@ DataAgent API (47:8000):
 
 StockShark API (49:5000):
   - POST /api/stock/analyze            股票分析
+  - GET /api/report/search             研报搜索（洞见研报）
 """
 import json
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -21,16 +23,17 @@ logger = logging.getLogger("d8q-news-mcp")
 
 
 DATAAGENT_BASE = "http://47.99.57.152:8000"
-SHARK_BASE = "http://49.234.48.221:5000"
+SHARK_BASE = "http://localhost:5000"
 TIMEOUT = 15
 
 mcp = FastMCP(
     "d8q-news",
     instructions=(
         "D8Q 智能引擎资讯服务。"
-        "可按赛道/主题获取资讯、关键词搜索资讯、查看资讯详情、查询股票综合画像。"
+        "可按赛道/主题获取资讯、关键词搜索资讯、查看资讯详情、查询股票综合画像、批量查询研报生成周报。"
         "6 个赛道：人工智能、具身智能、新材料、合成生物、碳纤维、量子计算。"
         "支持时间窗口过滤：1h（过去1小时）、6h、24h、7d、30d。"
+        "研报数据源：洞见研报（券商研报、机构调研、定期报告）。"
     ),
     host="0.0.0.0",
     port=58178,
@@ -275,6 +278,76 @@ def d8q_get_stock_profile(stock_code: str) -> str:
         lines.append("暂无关联资讯")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def d8q_search_reports(stocks: str, days: int = 7, limit_per_stock: int = 10) -> str:
+    """批量查询股票研报。根据股票名称或代码搜索相关研报，适合生成周报。
+
+    数据源：洞见研报（券商研报、机构调研、定期报告）。
+
+    参数：
+    - stocks: 股票列表，逗号分隔，支持名称或代码。如 "宁德时代,比亚迪,600036"
+    - days: 筛选最近N天的研报（默认7天）
+    - limit_per_stock: 每只股票返回的最大研报数（默认10，最大20）
+
+    返回每只股票的研报标题、机构、日期、摘要、来源链接。
+    适合用于生成每周研报摘要推送给用户。
+    """
+    limit_per_stock = min(limit_per_stock, 20)
+    stock_list = [s.strip() for s in stocks.split(",") if s.strip()]
+    if not stock_list:
+        return "错误：请提供至少一个股票名称或代码"
+
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    all_sections = []
+    total_reports = 0
+
+    for stock in stock_list:
+        data = _get(f"{SHARK_BASE}/api/report/search", params={"keyword": stock, "limit": 20})
+        if not data:
+            all_sections.append(f"### {stock}\n\n⚠ 查询失败，无法获取研报数据\n")
+            continue
+
+        raw_reports = data.get("reports", [])
+        reports = [r for r in raw_reports if r.get("date", "") >= cutoff]
+
+        if not reports:
+            all_sections.append(f"### {stock}\n\n近 {days} 天暂无研报\n")
+            continue
+
+        reports = reports[:limit_per_stock]
+        total_reports += len(reports)
+
+        # group by category
+        categories = {}
+        for r in reports:
+            cat = r.get("category", "其他")
+            categories.setdefault(cat, []).append(r)
+
+        section_lines = [f"### {stock}（{len(reports)} 篇研报）\n"]
+        for cat, cat_reports in categories.items():
+            section_lines.append(f"\n#### {cat}\n")
+            for r in cat_reports:
+                title = r.get("title", "无标题")
+                org = r.get("org", "")
+                date = r.get("date", "")
+                summary = (r.get("summary") or "")[:120]
+                url = r.get("detail_url", "")
+                link = f"  [详情]({url})" if url else ""
+                section_lines.append(f"- **{title}**")
+                if org:
+                    section_lines.append(f"  机构: {org} | 日期: {date}{link}")
+                if summary:
+                    section_lines.append(f"  摘要: {summary}")
+
+        all_sections.append("\n".join(section_lines))
+
+    header = f"# 研报周报（近 {days} 天）\n\n"
+    header += f"查询股票: {', '.join(stock_list)} | 共 {total_reports} 篇研报\n"
+    header += f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n---\n\n"
+
+    return header + "\n\n".join(all_sections)
 
 
 if __name__ == "__main__":
