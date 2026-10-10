@@ -74,14 +74,12 @@ class TestDateFiltering:
         assert "2 篇研报" in result
 
     @patch.object(server, "_get")
-    def test_reports_outside_range_excluded(self, mock_get):
-        old_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        mock_get.return_value = _api_response([
-            _make_report(title="旧研报", date=old_date),
-        ])
-        result = d8q_search_reports(stocks="测试", days=7)
-        assert "旧研报" not in result
-        assert "暂无研报" in result
+    def test_days_param_forwarded_to_api(self, mock_get):
+        """日期过滤由上游 API 完成：days 作为查询参数下发"""
+        mock_get.return_value = _api_response([])
+        d8q_search_reports(stocks="测试", days=7)
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"]["days"] == 7
 
     @patch.object(server, "_get")
     def test_boundary_exact_cutoff_included(self, mock_get):
@@ -94,27 +92,17 @@ class TestDateFiltering:
 
     @patch.object(server, "_get")
     def test_default_days_is_7(self, mock_get):
-        eight_days_ago = (datetime.now() - timedelta(days=8)).strftime("%Y-%m-%d")
-        six_days_ago = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
-        mock_get.return_value = _api_response([
-            _make_report(title="8天前", date=eight_days_ago),
-            _make_report(title="6天前", date=six_days_ago),
-        ])
-        result = d8q_search_reports(stocks="测试")
-        assert "6天前" in result
-        assert "8天前" not in result
+        mock_get.return_value = _api_response([])
+        d8q_search_reports(stocks="测试")
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"]["days"] == 7
 
     @patch.object(server, "_get")
     def test_days_30(self, mock_get):
-        twenty_nine = (datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d")
-        thirty_one = (datetime.now() - timedelta(days=31)).strftime("%Y-%m-%d")
-        mock_get.return_value = _api_response([
-            _make_report(title="29天前", date=twenty_nine),
-            _make_report(title="31天前", date=thirty_one),
-        ])
-        result = d8q_search_reports(stocks="测试", days=30)
-        assert "29天前" in result
-        assert "31天前" not in result
+        mock_get.return_value = _api_response([])
+        d8q_search_reports(stocks="测试", days=30)
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"]["days"] == 30
 
 
 class TestLimitPerStock:
@@ -189,15 +177,15 @@ class TestOutputFormat:
         assert "### 测试股（2 篇研报）" in result
 
     @patch.object(server, "_get")
-    def test_category_grouping(self, mock_get):
+    def test_announcements_grouped(self, mock_get):
         today = datetime.now().strftime("%Y-%m-%d")
-        mock_get.return_value = _api_response([
-            _make_report(title="研报A", date=today, category="券商研报"),
-            _make_report(title="研报B", date=today, category="机构调研"),
-        ])
+        resp = _api_response([_make_report(title="研报A", date=today)])
+        resp["announcements"] = [
+            {"date": today, "title": "公告1", "detail_url": "https://example.com/a1"},
+        ]
+        mock_get.return_value = resp
         result = d8q_search_reports(stocks="测试", days=7)
-        assert "#### 券商研报" in result
-        assert "#### 机构调研" in result
+        assert "#### 巨潮公告（1 条）" in result
 
     @patch.object(server, "_get")
     def test_total_count_across_stocks(self, mock_get):
@@ -220,8 +208,7 @@ class TestOutputFormat:
 
     @patch.object(server, "_get")
     def test_no_reports_message(self, mock_get):
-        old = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-        mock_get.return_value = _api_response([_make_report(date=old)])
+        mock_get.return_value = _api_response([])
         result = d8q_search_reports(stocks="测试", days=7)
         assert "近 7 天暂无研报" in result
 
